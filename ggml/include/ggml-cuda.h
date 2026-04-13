@@ -27,6 +27,9 @@ GGML_BACKEND_API bool ggml_backend_is_cuda(ggml_backend_t backend);
 // device buffer
 GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int device);
 
+// 동적으로 VRAM Soft Cap을 설정하기 위한 API 추가
+GGML_BACKEND_API void ggml_backend_cuda_set_vram_limit(int device, size_t limit_bytes);
+
 // conduct allreduce operation between devices
 GGML_BACKEND_API bool ggml_backend_cuda_allreduce_tensor(ggml_backend_t * backends, struct ggml_tensor ** tensors, size_t n_backends);
 
