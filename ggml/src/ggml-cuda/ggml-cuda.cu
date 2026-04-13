@@ -601,27 +601,47 @@ ggml_backend_cuda_context::~ggml_backend_cuda_context() {
 }
 
 
+// cuda buffer type context (미리 선언)
+struct ggml_backend_cuda_buffer_type_context {
+    int device;
+    std::string name;
+    size_t limit_vram = 0; // VRAM 제한 (Soft Cap)
+    size_t used_vram = 0;  // 누적 사용량
+};
+
 // cuda buffer
 
 struct ggml_backend_cuda_buffer_context {
     int device;
     void * dev_ptr = nullptr;
     std::string name;
+    bool is_host = false; // CPU RAM (Pinned) 여부
 
-    ggml_backend_cuda_buffer_context(int device, void * dev_ptr) :
+    ggml_backend_cuda_buffer_context(int device, void * dev_ptr, bool is_host = false) :
         device(device), dev_ptr(dev_ptr),
-        name(GGML_CUDA_NAME + std::to_string(device)) {
+        name(GGML_CUDA_NAME + std::to_string(device)), is_host(is_host) {
     }
 
     ~ggml_backend_cuda_buffer_context() {
-        CUDA_CHECK(cudaFree(dev_ptr));
+        if (is_host) {
+            CUDA_CHECK(cudaFreeHost(dev_ptr));
+        } else {
+            CUDA_CHECK(cudaFree(dev_ptr));
+        }
     }
 };
 
 static void ggml_backend_cuda_buffer_free_buffer(ggml_backend_buffer_t buffer) {
     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
+    if (!ctx->is_host) {
+        ggml_backend_cuda_buffer_type_context * buft_ctx = (ggml_backend_cuda_buffer_type_context *)buffer->buft->context;
+        if (buft_ctx->used_vram >= buffer->size) {
+            buft_ctx->used_vram -= buffer->size;
+        }
+    }
     delete ctx;
 }
+
 
 static bool ggml_backend_buffer_is_cuda(ggml_backend_buffer_t buffer) {
     return buffer->iface.free_buffer == ggml_backend_cuda_buffer_free_buffer;
@@ -662,18 +682,18 @@ static void ggml_backend_cuda_buffer_memset_tensor(ggml_backend_buffer_t buffer,
 }
 
 static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
-    ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *) buffer->context;
+    ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
 
     ggml_cuda_set_device(ctx->device);
-    CUDA_CHECK(cudaMemcpyAsync((char *) tensor->data + offset, data, size, cudaMemcpyHostToDevice, cudaStreamPerThread));
+    CUDA_CHECK(cudaMemcpyAsync((char *)tensor->data + offset, data, size, cudaMemcpyDefault, cudaStreamPerThread));
     CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
 }
 
 static void ggml_backend_cuda_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
-    ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *) buffer->context;
+    ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
 
     ggml_cuda_set_device(ctx->device);
-    CUDA_CHECK(cudaMemcpyAsync(data, (const char *) tensor->data + offset, size, cudaMemcpyDeviceToHost, cudaStreamPerThread));
+    CUDA_CHECK(cudaMemcpyAsync(data, (const char *)tensor->data + offset, size, cudaMemcpyDefault, cudaStreamPerThread));
     CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
 }
 
@@ -741,10 +761,7 @@ static const ggml_backend_buffer_i ggml_backend_cuda_buffer_interface = {
 };
 
 // cuda buffer type
-struct ggml_backend_cuda_buffer_type_context {
-    int device;
-    std::string name;
-};
+// (struct ggml_backend_cuda_buffer_type_context 는 위에서 선언됨)
 
 static const char * ggml_backend_cuda_buffer_type_get_name(ggml_backend_buffer_type_t buft) {
     ggml_backend_cuda_buffer_type_context * ctx = (ggml_backend_cuda_buffer_type_context *)buft->context;
@@ -762,15 +779,28 @@ static ggml_backend_buffer_t ggml_backend_cuda_buffer_type_alloc_buffer(ggml_bac
     ggml_cuda_set_device(buft_ctx->device);
 
     void * dev_ptr;
-    cudaError_t err = ggml_cuda_device_malloc(&dev_ptr, size, buft_ctx->device);
-    if (err != cudaSuccess) {
-        // clear the error
-        (void)cudaGetLastError();
-        GGML_LOG_ERROR("%s: allocating %.2f MiB on device %d: cudaMalloc failed: %s\n", __func__, size / 1024.0 / 1024.0, buft_ctx->device, cudaGetErrorString(err));
-        return nullptr;
+    bool is_host = false;
+
+    // Soft VRAM Cap 검사 로직
+    if (buft_ctx->limit_vram > 0 && (buft_ctx->used_vram + size > buft_ctx->limit_vram)) {
+        cudaError_t err = cudaMallocHost(&dev_ptr, size); // CPU Pinned Memory 우회
+        if (err != cudaSuccess) {
+            (void)cudaGetLastError();
+            GGML_LOG_ERROR("%s: allocating %.2f MiB on host (VRAM cap exceeded): cudaMallocHost failed: %s\n", __func__, size / 1024.0 / 1024.0, cudaGetErrorString(err));
+            return nullptr;
+        }
+        is_host = true;
+    } else {
+        cudaError_t err = ggml_cuda_device_malloc(&dev_ptr, size, buft_ctx->device);
+        if (err != cudaSuccess) {
+            (void)cudaGetLastError();
+            GGML_LOG_ERROR("%s: allocating %.2f MiB on device %d: cudaMalloc failed: %s\n", __func__, size / 1024.0 / 1024.0, buft_ctx->device, cudaGetErrorString(err));
+            return nullptr;
+        }
+        buft_ctx->used_vram += size;
     }
 
-    ggml_backend_cuda_buffer_context * ctx = new ggml_backend_cuda_buffer_context(buft_ctx->device, dev_ptr);
+    ggml_backend_cuda_buffer_context * ctx = new ggml_backend_cuda_buffer_context(buft_ctx->device, dev_ptr, is_host);
 
     return ggml_backend_buffer_init(buft, ggml_backend_cuda_buffer_interface, ctx, size);
 }
@@ -831,6 +861,16 @@ ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int device) {
 
     return &ggml_backend_cuda_buffer_types[device];
 }
+
+void ggml_backend_cuda_set_vram_limit(int device, size_t limit_bytes) {
+    ggml_backend_buffer_type_t buft = ggml_backend_cuda_buffer_type(device);
+    if (buft != nullptr) {
+        ggml_backend_cuda_buffer_type_context * ctx = (ggml_backend_cuda_buffer_type_context *)buft->context;
+        ctx->limit_vram = limit_bytes;
+        GGML_LOG_INFO("%s: VRAM Soft Cap for device %d set to %.2f MiB\n", __func__, device, limit_bytes / 1024.0 / 1024.0);
+    }
+}
+
 
 // cuda split buffer
 
