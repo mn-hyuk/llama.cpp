@@ -37,6 +37,75 @@ Built upon `clip.cpp` (similar to `llava.cpp`), `libmtmd` offers several advanta
 - **Improved UX/DX:** Features a more intuitive API, inspired by the `Processor` class in the Hugging Face `transformers` library.
 - **Flexibility:** Designed to support multiple input types (text, audio, images) while respecting the wide variety of chat templates used by different models.
 
+## Layerwise mmproj offload and runtime swap
+
+Layer-based vision encoders can use two different `mmproj` placement modes:
+
+### 1. Static layer placement
+
+Keep a fixed subset of encoder layers on the GPU and leave the rest on the CPU:
+
+```bash
+./build/bin/llama-mtmd-cli \
+  -m /path/to/model.gguf \
+  --mmproj /path/to/mmproj.gguf \
+  --image /path/to/image.jpg \
+  --mmproj-offload \
+  --mmproj-n-gpu-layers 8
+```
+
+You can also select exact layers explicitly:
+
+```bash
+./build/bin/llama-mtmd-cli \
+  -m /path/to/model.gguf \
+  --mmproj /path/to/mmproj.gguf \
+  --image /path/to/image.jpg \
+  --mmproj-offload \
+  --mmproj-gpu-layers 0-3,8,10-12
+```
+
+- `--mmproj-n-gpu-layers N`: keeps the last `N` encoder layers on the GPU.
+- `--mmproj-gpu-layers LAYERS`: selects exact encoder layers to place on the GPU.
+- `--mmproj-gpu-layers` overrides `--mmproj-n-gpu-layers`.
+
+### 2. Runtime swap / streaming
+
+Keep encoder weights on the CPU and stream only a chunk of encoder layers through the GPU at execution time:
+
+```bash
+./build/bin/llama-mtmd-cli \
+  -m /path/to/model.gguf \
+  --mmproj /path/to/mmproj.gguf \
+  --image /path/to/image.jpg \
+  --mmproj-offload \
+  --mmproj-runtime-swap \
+  --mmproj-n-gpu-layers 4
+```
+
+In this mode:
+
+- `--mmproj-n-gpu-layers N` means the number of encoder layers to execute per GPU chunk.
+- encoder layer weights remain on the CPU and are streamed through the GPU during vision encoding.
+- `--mmproj-gpu-layers` is not compatible with `--mmproj-runtime-swap`.
+
+This mode is intended for GPU-constrained environments where full `mmproj` offload does not fit comfortably in VRAM, but a smaller execution chunk does.
+
+### Current support
+
+`--mmproj-runtime-swap` currently supports:
+
+- Gemma 3 vision encoders
+- Qwen3-VL vision encoders
+
+For unsupported projectors, `llama.cpp` falls back to the existing static loading path.
+
+### Notes
+
+- `--mmproj-n-gpu-layers -1` keeps the legacy full-offload behavior when runtime swap is disabled.
+- Runtime swap is only useful when `--mmproj-offload` can initialize a GPU backend.
+- Warmup / graph reservation also follow the runtime-swap pre/chunk/post execution path, so VRAM sizing is based on the chunked execution flow instead of the full encoder graph.
+
 ## How to obtain `mmproj`
 
 Multimodal projector (`mmproj`) files are specific to each model architecture.

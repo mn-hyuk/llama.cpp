@@ -704,6 +704,9 @@ private:
             mparams.use_gpu          = params_base.mmproj_use_gpu;
             mparams.print_timings    = false;
             mparams.n_threads        = params_base.cpuparams.n_threads;
+            mparams.n_gpu_layers     = params_base.mmproj_n_gpu_layers;
+            mparams.gpu_layers       = params_base.mmproj_gpu_layers.empty() ? nullptr : params_base.mmproj_gpu_layers.c_str();
+            mparams.runtime_swap     = params_base.mmproj_runtime_swap;
             mparams.flash_attn_type  = params_base.flash_attn_type;
             mparams.warmup           = params_base.warmup;
             mparams.image_min_tokens = params_base.image_min_tokens;

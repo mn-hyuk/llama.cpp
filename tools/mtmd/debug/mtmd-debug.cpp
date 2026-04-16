@@ -82,6 +82,9 @@ int main(int argc, char ** argv) {
         mparams.use_gpu          = params.mmproj_use_gpu;
         mparams.print_timings    = true;
         mparams.n_threads        = params.cpuparams.n_threads;
+        mparams.n_gpu_layers     = params.mmproj_n_gpu_layers;
+        mparams.gpu_layers       = params.mmproj_gpu_layers.empty() ? nullptr : params.mmproj_gpu_layers.c_str();
+        mparams.runtime_swap     = params.mmproj_runtime_swap;
         mparams.flash_attn_type  = params.flash_attn_type;
         mparams.warmup           = params.warmup;
         mparams.image_min_tokens = params.image_min_tokens;
@@ -227,4 +230,3 @@ int main(int argc, char ** argv) {
 
     return 0;
 }
-

@@ -44,7 +44,9 @@ static void show_additional_info(int /*argc*/, char ** argv) {
         "  -m and --mmproj are required\n"
         "  -hf user/repo can replace both -m and --mmproj in most cases\n"
         "  --image, --audio and -p are optional, if NOT provided, the CLI will run in chat mode\n"
-        "  to disable using GPU for mmproj model, add --no-mmproj-offload\n",
+        "  to disable using GPU for mmproj model, add --no-mmproj-offload\n"
+        "  to place only selected vision layers on GPU, use --mmproj-gpu-layers 0-3,8,10-12\n"
+        "  to stream encoder layers through GPU, add --mmproj-runtime-swap --mmproj-n-gpu-layers <chunk>\n",
         argv[0]
     );
 }
@@ -139,6 +141,9 @@ struct mtmd_cli_context {
         mparams.use_gpu          = params.mmproj_use_gpu;
         mparams.print_timings    = true;
         mparams.n_threads        = params.cpuparams.n_threads;
+        mparams.n_gpu_layers     = params.mmproj_n_gpu_layers;
+        mparams.gpu_layers       = params.mmproj_gpu_layers.empty() ? nullptr : params.mmproj_gpu_layers.c_str();
+        mparams.runtime_swap     = params.mmproj_runtime_swap;
         mparams.flash_attn_type  = params.flash_attn_type;
         mparams.warmup           = params.warmup;
         mparams.image_min_tokens = params.image_min_tokens;

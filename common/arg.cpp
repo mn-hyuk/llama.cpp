@@ -2178,6 +2178,32 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples(mmproj_examples).set_env("LLAMA_ARG_MMPROJ_OFFLOAD"));
     add_opt(common_arg(
+        {"--mmproj-n-gpu-layers"}, "N",
+        "number of multimodal encoder layers to keep on GPU. only affects layer-based vision encoders; "
+        "-1 keeps the legacy behavior and fully offloads mmproj when --mmproj-offload is enabled; "
+        "when --mmproj-runtime-swap is set, this becomes the number of encoder layers to stream per GPU chunk",
+        [](common_params & params, int value) {
+            params.mmproj_n_gpu_layers = value;
+        }
+    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_MMPROJ_N_GPU_LAYERS"));
+    add_opt(common_arg(
+        {"--mmproj-runtime-swap"},
+        "enable runtime layer streaming for supported multimodal vision encoders. "
+        "encoder layer weights stay on CPU and are streamed through GPU in chunks controlled by --mmproj-n-gpu-layers",
+        [](common_params & params) {
+            params.mmproj_runtime_swap = true;
+        }
+    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_MMPROJ_RUNTIME_SWAP"));
+    add_opt(common_arg(
+        {"--mmproj-gpu-layers"}, "LAYERS",
+        "explicit multimodal encoder layers to place on GPU, e.g. 0-3,8,10-12. "
+        "when set, this takes precedence over --mmproj-n-gpu-layers; "
+        "not compatible with --mmproj-runtime-swap",
+        [](common_params & params, const std::string & value) {
+            params.mmproj_gpu_layers = value;
+        }
+    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_MMPROJ_GPU_LAYERS"));
+    add_opt(common_arg(
         {"--image", "--audio"}, "FILE",
         "path to an image or audio file. use with multimodal models, use comma-separated values for multiple files\n",
         [](common_params & params, const std::string & value) {

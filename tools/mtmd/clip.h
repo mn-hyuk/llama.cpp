@@ -37,6 +37,9 @@ struct clip_context_params {
     enum clip_flash_attn_type flash_attn_type;
     int image_min_tokens;
     int image_max_tokens;
+    int n_gpu_layers;
+    const char * gpu_layers;
+    bool runtime_swap;
     bool warmup;
     ggml_backend_sched_eval_callback cb_eval;
     void * cb_eval_user_data;

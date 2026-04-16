@@ -554,6 +554,9 @@ struct common_params {
     // multimodal models (see tools/mtmd)
     struct common_params_model mmproj;
     bool mmproj_use_gpu = true;     // use GPU for multimodal model
+    int32_t mmproj_n_gpu_layers = -1; // number of multimodal encoder layers to place on GPU (-1 = legacy/full offload)
+    std::string mmproj_gpu_layers;  // explicit multimodal encoder layers to place on GPU, e.g. "0-3,8,10-12"
+    bool mmproj_runtime_swap = false; // stream encoder layers through GPU in chunks instead of static placement
     bool no_mmproj = false;         // explicitly disable multimodal model
     std::vector<std::string> image; // path to image file(s)
     int image_min_tokens = -1;

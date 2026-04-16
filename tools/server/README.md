@@ -180,6 +180,9 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `-mmu, --mmproj-url URL` | URL to a multimodal projector file. see tools/mtmd/README.md<br/>(env: LLAMA_ARG_MMPROJ_URL) |
 | `--mmproj-auto, --no-mmproj, --no-mmproj-auto` | whether to use multimodal projector file (if available), useful when using -hf (default: enabled)<br/>(env: LLAMA_ARG_MMPROJ_AUTO) |
 | `--mmproj-offload, --no-mmproj-offload` | whether to enable GPU offloading for multimodal projector (default: enabled)<br/>(env: LLAMA_ARG_MMPROJ_OFFLOAD) |
+| `--mmproj-n-gpu-layers N` | number of multimodal encoder layers to keep on GPU. only affects layer-based vision encoders; `-1` keeps the legacy full-offload behavior when `--mmproj-offload` is enabled. with `--mmproj-runtime-swap`, this becomes the number of encoder layers streamed through GPU per chunk<br/>(env: LLAMA_ARG_MMPROJ_N_GPU_LAYERS) |
+| `--mmproj-runtime-swap` | enable runtime layer streaming for supported multimodal vision encoders; encoder layer weights stay on CPU and are streamed through GPU in chunks controlled by `--mmproj-n-gpu-layers`<br/>(env: LLAMA_ARG_MMPROJ_RUNTIME_SWAP) |
+| `--mmproj-gpu-layers LAYERS` | explicit multimodal encoder layers to place on GPU, e.g. `0-3,8,10-12`; takes precedence over `--mmproj-n-gpu-layers` and is not compatible with `--mmproj-runtime-swap`<br/>(env: LLAMA_ARG_MMPROJ_GPU_LAYERS) |
 | `--image-min-tokens N` | minimum number of tokens each image can take, only used by vision models with dynamic resolution (default: read from model)<br/>(env: LLAMA_ARG_IMAGE_MIN_TOKENS) |
 | `--image-max-tokens N` | maximum number of tokens each image can take, only used by vision models with dynamic resolution (default: read from model)<br/>(env: LLAMA_ARG_IMAGE_MAX_TOKENS) |
 | `-otd, --override-tensor-draft <tensor name pattern>=<buffer type>,...` | override tensor buffer type for draft model |

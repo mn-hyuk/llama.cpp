@@ -87,6 +87,9 @@ struct mtmd_context_params {
     bool use_gpu;
     bool print_timings;
     int n_threads;
+    int n_gpu_layers; // number of encoder layers to place on GPU (-1 = legacy/full offload)
+    const char * gpu_layers; // explicit encoder layer list/ranges to place on GPU, overrides n_gpu_layers
+    bool runtime_swap; // stream encoder weights through GPU in layer chunks
     const char * image_marker; // deprecated, use media_marker instead
     const char * media_marker;
     enum llama_flash_attn_type flash_attn_type;
