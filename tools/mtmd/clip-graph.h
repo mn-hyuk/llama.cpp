@@ -36,7 +36,7 @@ struct clip_graph {
     ggml_context * ctx0;
     ggml_cgraph * gf;
 
-    clip_graph(clip_ctx * ctx, const clip_image_f32 & img);
+    clip_graph(clip_ctx * ctx, const clip_image_f32 & img, std::vector<uint8_t> * compute_meta_override = nullptr);
 
     virtual ~clip_graph() = default;
     virtual ggml_cgraph * build() = 0;

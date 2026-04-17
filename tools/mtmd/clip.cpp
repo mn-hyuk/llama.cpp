@@ -565,7 +565,7 @@ static void clip_alloc_weight_buffers(clip_ctx & ctx_clip, const std::vector<ggm
 // clip_graph
 //
 
-clip_graph::clip_graph(clip_ctx * ctx, const clip_image_f32 & img) :
+clip_graph::clip_graph(clip_ctx * ctx, const clip_image_f32 & img, std::vector<uint8_t> * compute_meta_override) :
         model(ctx->model),
         hparams(model.hparams),
         proj_type(ctx->proj_type()),
@@ -582,9 +582,10 @@ clip_graph::clip_graph(clip_ctx * ctx, const clip_image_f32 & img) :
         eps(hparams.eps),
         kq_scale(1.0f / sqrtf((float)d_head)),
         flash_attn_type(ctx->flash_attn_type) {
+    std::vector<uint8_t> & compute_meta = compute_meta_override != nullptr ? *compute_meta_override : ctx->buf_compute_meta;
     struct ggml_init_params params = {
-        /*.mem_size   =*/ ctx->buf_compute_meta.size(),
-        /*.mem_buffer =*/ ctx->buf_compute_meta.data(),
+        /*.mem_size   =*/ compute_meta.size(),
+        /*.mem_buffer =*/ compute_meta.data(),
         /*.no_alloc   =*/ true,
     };
     ctx0_ptr.reset(ggml_init(params));
@@ -1403,13 +1404,31 @@ static void clip_backend_cpu_set_threads(clip_ctx * ctx, int n_threads) {
 static bool clip_compute_graph(clip_ctx * ctx, const int n_threads, ggml_cgraph * gf) {
     clip_backend_cpu_set_threads(ctx, n_threads);
 
-    auto status = ggml_backend_sched_graph_compute(ctx->sched.get(), gf);
+    auto status = ggml_backend_sched_graph_compute_async(ctx->sched.get(), gf);
     if (status != GGML_STATUS_SUCCESS) {
-        LOG_ERR("%s: ggml_backend_sched_graph_compute failed with error %d\n", __func__, status);
+        LOG_ERR("%s: ggml_backend_sched_graph_compute_async failed with error %d\n", __func__, status);
+        return false;
+    }
+
+    ggml_backend_sched_synchronize(ctx->sched.get());
+
+    return true;
+}
+
+static bool clip_compute_graph_async(clip_ctx * ctx, const int n_threads, ggml_cgraph * gf) {
+    clip_backend_cpu_set_threads(ctx, n_threads);
+
+    auto status = ggml_backend_sched_graph_compute_async(ctx->sched.get(), gf);
+    if (status != GGML_STATUS_SUCCESS) {
+        LOG_ERR("%s: ggml_backend_sched_graph_compute_async failed with error %d\n", __func__, status);
         return false;
     }
 
     return true;
+}
+
+static void clip_compute_graph_wait(clip_ctx * ctx) {
+    ggml_backend_sched_synchronize(ctx->sched.get());
 }
 
 struct clip_staging_tensor {
@@ -1423,6 +1442,10 @@ struct clip_backend_view {
     std::vector<uint8_t> meta_buf;
     ggml_context_ptr ctx;
     ggml_tensor * tensor = nullptr;
+};
+
+struct clip_runtime_swap_graph_slot {
+    std::vector<uint8_t> meta_buf;
 };
 
 static void clip_force_tensor_backend(clip_ctx * ctx, ggml_cgraph * gf, const char * name);
@@ -1474,6 +1497,12 @@ static clip_backend_view clip_make_backend_view_1d(ggml_tensor * tensor, int64_t
     const enum ggml_status status = ggml_backend_view_init(view.tensor);
     GGML_ASSERT(status == GGML_STATUS_SUCCESS);
     return view;
+}
+
+static clip_runtime_swap_graph_slot clip_runtime_swap_make_graph_slot(const clip_ctx * ctx) {
+    clip_runtime_swap_graph_slot slot;
+    slot.meta_buf.resize(ctx->buf_compute_meta.size());
+    return slot;
 }
 
 static bool clip_runtime_swap_alloc_graph(clip_ctx * ctx, ggml_cgraph * gf, std::initializer_list<const char *> gpu_tensor_names = {}) {
@@ -1598,8 +1627,8 @@ static int clip_qwen3_count_deepstack_layers(const clip_ctx * ctx, int layer_sta
     return count;
 }
 
-static ggml_cgraph * clip_runtime_swap_build_gemma3_pre_graph(clip_ctx * ctx, const clip_image_f32 & img) {
-    clip_graph_siglip builder(ctx, img);
+static ggml_cgraph * clip_runtime_swap_build_gemma3_pre_graph(clip_ctx * ctx, const clip_image_f32 & img, clip_runtime_swap_graph_slot * slot = nullptr) {
+    clip_graph_siglip builder(ctx, img, slot ? &slot->meta_buf : nullptr);
 
     ggml_tensor * cur = builder.build_inp();
     cur = ggml_add(builder.ctx0, cur, builder.model.position_embeddings);
@@ -1616,8 +1645,8 @@ static ggml_cgraph * clip_runtime_swap_build_gemma3_pre_graph(clip_ctx * ctx, co
     return builder.gf;
 }
 
-static ggml_cgraph * clip_runtime_swap_build_gemma3_chunk_graph(clip_ctx * ctx, const clip_image_f32 & img, int layer_start, int layer_end) {
-    clip_graph_siglip builder(ctx, img);
+static ggml_cgraph * clip_runtime_swap_build_gemma3_chunk_graph(clip_ctx * ctx, const clip_image_f32 & img, int layer_start, int layer_end, clip_runtime_swap_graph_slot * slot = nullptr) {
+    clip_graph_siglip builder(ctx, img, slot ? &slot->meta_buf : nullptr);
 
     ggml_tensor * inpL = ggml_new_tensor_3d(builder.ctx0, GGML_TYPE_F32, builder.n_embd, builder.n_patches, 1);
     ggml_set_name(inpL, "stream_hidden_in");
@@ -1743,8 +1772,8 @@ static ggml_cgraph * clip_runtime_swap_build_gemma3_chunk_graph(clip_ctx * ctx, 
     return builder.gf;
 }
 
-static ggml_cgraph * clip_runtime_swap_build_gemma3_post_graph(clip_ctx * ctx, const clip_image_f32 & img) {
-    clip_graph_siglip builder(ctx, img);
+static ggml_cgraph * clip_runtime_swap_build_gemma3_post_graph(clip_ctx * ctx, const clip_image_f32 & img, clip_runtime_swap_graph_slot * slot = nullptr) {
+    clip_graph_siglip builder(ctx, img, slot ? &slot->meta_buf : nullptr);
 
     ggml_tensor * cur = ggml_new_tensor_3d(builder.ctx0, GGML_TYPE_F32, builder.n_embd, builder.n_patches, 1);
     ggml_set_name(cur, "stream_hidden_in");
@@ -1771,8 +1800,8 @@ static ggml_cgraph * clip_runtime_swap_build_gemma3_post_graph(clip_ctx * ctx, c
     return builder.gf;
 }
 
-static ggml_cgraph * clip_runtime_swap_build_qwen3_pre_graph(clip_ctx * ctx, const clip_image_f32 & img) {
-    clip_graph_qwen3vl builder(ctx, img);
+static ggml_cgraph * clip_runtime_swap_build_qwen3_pre_graph(clip_ctx * ctx, const clip_image_f32 & img, clip_runtime_swap_graph_slot * slot = nullptr) {
+    clip_graph_qwen3vl builder(ctx, img, slot ? &slot->meta_buf : nullptr);
     const int batch_size = 1;
 
     ggml_tensor * inp_raw = builder.build_inp_raw();
@@ -1810,8 +1839,8 @@ static ggml_cgraph * clip_runtime_swap_build_qwen3_pre_graph(clip_ctx * ctx, con
     return builder.gf;
 }
 
-static ggml_cgraph * clip_runtime_swap_build_qwen3_chunk_graph(clip_ctx * ctx, const clip_image_f32 & img, int layer_start, int layer_end) {
-    clip_graph_qwen3vl builder(ctx, img);
+static ggml_cgraph * clip_runtime_swap_build_qwen3_chunk_graph(clip_ctx * ctx, const clip_image_f32 & img, int layer_start, int layer_end, clip_runtime_swap_graph_slot * slot = nullptr) {
+    clip_graph_qwen3vl builder(ctx, img, slot ? &slot->meta_buf : nullptr);
     const int batch_size = 1;
     const int n_pos = builder.n_patches;
     const int merge_factor = builder.hparams.n_merge > 0 ? builder.hparams.n_merge * builder.hparams.n_merge : 4;
@@ -1886,8 +1915,8 @@ static ggml_cgraph * clip_runtime_swap_build_qwen3_chunk_graph(clip_ctx * ctx, c
     return builder.gf;
 }
 
-static ggml_cgraph * clip_runtime_swap_build_qwen3_post_graph(clip_ctx * ctx, const clip_image_f32 & img) {
-    clip_graph_qwen3vl builder(ctx, img);
+static ggml_cgraph * clip_runtime_swap_build_qwen3_post_graph(clip_ctx * ctx, const clip_image_f32 & img, clip_runtime_swap_graph_slot * slot = nullptr) {
+    clip_graph_qwen3vl builder(ctx, img, slot ? &slot->meta_buf : nullptr);
     const int batch_size = 1;
     const int n_pos = builder.n_patches;
     const int merge_factor = builder.hparams.n_merge > 0 ? builder.hparams.n_merge * builder.hparams.n_merge : 4;
@@ -1928,6 +1957,10 @@ static bool clip_image_batch_encode_runtime_swap_gemma3(clip_ctx * ctx, const in
     const int chunk_layers = clip_runtime_swap_chunk_layers(*ctx);
 
     clip_staging_tensor hidden_staging;
+    clip_runtime_swap_graph_slot slots[2] = {
+        clip_runtime_swap_make_graph_slot(ctx),
+        clip_runtime_swap_make_graph_slot(ctx),
+    };
     {
         clip_graph_siglip builder(ctx, img);
         if (!clip_make_staging_tensor_checked(ctx->backend, GGML_TYPE_F32, builder.n_embd, builder.n_patches, 1, hidden_staging, "gemma3 hidden")) {
@@ -1936,54 +1969,76 @@ static bool clip_image_batch_encode_runtime_swap_gemma3(clip_ctx * ctx, const in
     }
 
     {
-        ggml_cgraph * gf = clip_runtime_swap_build_gemma3_pre_graph(ctx, img);
-        if (!clip_runtime_swap_alloc_graph(ctx, gf, {"stream_hidden_out"})) {
+        ggml_cgraph * gf_pre = clip_runtime_swap_build_gemma3_pre_graph(ctx, img, &slots[0]);
+        if (!clip_runtime_swap_alloc_graph(ctx, gf_pre, {"stream_hidden_out"})) {
             return false;
         }
-        clip_graph_set_input_f32(gf, "inp_raw", inp_raw);
-        if (!clip_compute_graph(ctx, n_threads, gf)) {
+        clip_graph_set_input_f32(gf_pre, "inp_raw", inp_raw);
+        if (!clip_compute_graph_async(ctx, n_threads, gf_pre)) {
             return false;
         }
-        ggml_backend_tensor_copy(clip_graph_get_tensor_required(gf, "stream_hidden_out"), hidden_staging.tensor);
-    }
+        ggml_cgraph * first_chunk = nullptr;
+        if (!ctx->model.layers.empty()) {
+            first_chunk = clip_runtime_swap_build_gemma3_chunk_graph(ctx, img, 0, std::min(chunk_layers, (int) ctx->model.layers.size()), &slots[1]);
+        }
+        clip_compute_graph_wait(ctx);
+        ggml_backend_tensor_copy(clip_graph_get_tensor_required(gf_pre, "stream_hidden_out"), hidden_staging.tensor);
+        int cur_slot = 1;
+        ggml_cgraph * gf_chunk = first_chunk;
+        for (int layer_start = 0; layer_start < (int) ctx->model.layers.size(); layer_start += chunk_layers) {
+            const int layer_end = std::min(layer_start + chunk_layers, (int) ctx->model.layers.size());
+            GGML_ASSERT(gf_chunk != nullptr);
+            ggml_cgraph * gf = gf_chunk;
+            const bool has_next = layer_end < (int) ctx->model.layers.size();
+            ggml_cgraph * next_gf = nullptr;
 
-    for (int layer_start = 0; layer_start < (int) ctx->model.layers.size(); layer_start += chunk_layers) {
-        const int layer_end = std::min(layer_start + chunk_layers, (int) ctx->model.layers.size());
-        ggml_cgraph * gf = clip_runtime_swap_build_gemma3_chunk_graph(ctx, img, layer_start, layer_end);
+            if (!clip_runtime_swap_alloc_graph(ctx, gf, {"stream_hidden_in", "stream_hidden_out"})) {
+                return false;
+            }
+            ggml_backend_tensor_copy(hidden_staging.tensor, clip_graph_get_tensor_required(gf, "stream_hidden_in"));
+            if (!clip_compute_graph_async(ctx, n_threads, gf)) {
+                return false;
+            }
+
+            if (has_next) {
+                const int next_layer_end = std::min(layer_end + chunk_layers, (int) ctx->model.layers.size());
+                next_gf = clip_runtime_swap_build_gemma3_chunk_graph(ctx, img, layer_end, next_layer_end, &slots[cur_slot ^ 1]);
+            } else {
+                next_gf = clip_runtime_swap_build_gemma3_post_graph(ctx, img, &slots[cur_slot ^ 1]);
+            }
+
+            clip_compute_graph_wait(ctx);
+            ggml_backend_tensor_copy(clip_graph_get_tensor_required(gf, "stream_hidden_out"), hidden_staging.tensor);
+
+            gf_chunk = next_gf;
+            cur_slot ^= 1;
+        }
+
+        ggml_cgraph * gf = gf_chunk;
         if (!clip_runtime_swap_alloc_graph(ctx, gf, {"stream_hidden_in", "stream_hidden_out"})) {
-            return false;
+            GGML_ABORT("unexpected runtime swap graph state");
         }
         ggml_backend_tensor_copy(hidden_staging.tensor, clip_graph_get_tensor_required(gf, "stream_hidden_in"));
         if (!clip_compute_graph(ctx, n_threads, gf)) {
             return false;
         }
-        ggml_backend_tensor_copy(clip_graph_get_tensor_required(gf, "stream_hidden_out"), hidden_staging.tensor);
-    }
 
-    ggml_cgraph * gf = clip_runtime_swap_build_gemma3_post_graph(ctx, img);
-    if (!clip_runtime_swap_alloc_graph(ctx, gf, {"stream_hidden_in"})) {
-        return false;
-    }
-    ggml_backend_tensor_copy(hidden_staging.tensor, clip_graph_get_tensor_required(gf, "stream_hidden_in"));
-    if (!clip_compute_graph(ctx, n_threads, gf)) {
-        return false;
-    }
+        ggml_tensor * embeddings = clip_graph_get_tensor_required(gf, "stream_embeddings");
+        const int n_tokens_out = embeddings->ne[1];
+        const int expected_n_tokens_out = clip_n_output_tokens(ctx, imgs.entries[0].get());
+        if (n_tokens_out != expected_n_tokens_out) {
+            LOG_ERR("%s: expected output %d tokens, got %d\n", __func__, expected_n_tokens_out, n_tokens_out);
+            GGML_ABORT("Invalid number of output tokens");
+        }
 
-    ggml_tensor * embeddings = clip_graph_get_tensor_required(gf, "stream_embeddings");
-    const int n_tokens_out = embeddings->ne[1];
-    const int expected_n_tokens_out = clip_n_output_tokens(ctx, imgs.entries[0].get());
-    if (n_tokens_out != expected_n_tokens_out) {
-        LOG_ERR("%s: expected output %d tokens, got %d\n", __func__, expected_n_tokens_out, n_tokens_out);
-        GGML_ABORT("Invalid number of output tokens");
+        if (vec != nullptr) {
+            ggml_backend_tensor_get(embeddings, vec, 0, ggml_nbytes(embeddings));
+        }
+
+        clip_maybe_debug_output_embeddings(ctx, embeddings);
+
+        return true;
     }
-
-    if (vec != nullptr) {
-        ggml_backend_tensor_get(embeddings, vec, 0, ggml_nbytes(embeddings));
-    }
-
-    clip_maybe_debug_output_embeddings(ctx, embeddings);
-
-    return true;
 }
 
 static bool clip_image_batch_encode_runtime_swap_qwen3vl(clip_ctx * ctx, const int n_threads, const clip_image_f32_batch & imgs, float * vec) {
@@ -1998,6 +2053,10 @@ static bool clip_image_batch_encode_runtime_swap_qwen3vl(clip_ctx * ctx, const i
 
     clip_staging_tensor hidden_staging;
     clip_staging_tensor deepstack_staging;
+    clip_runtime_swap_graph_slot slots[2] = {
+        clip_runtime_swap_make_graph_slot(ctx),
+        clip_runtime_swap_make_graph_slot(ctx),
+    };
     {
         clip_graph_qwen3vl builder(ctx, img);
         if (!clip_make_staging_tensor_checked(ctx->backend, GGML_TYPE_F32, builder.n_embd, builder.n_patches, 1, hidden_staging, "qwen3 hidden")) {
@@ -2013,73 +2072,95 @@ static bool clip_image_batch_encode_runtime_swap_qwen3vl(clip_ctx * ctx, const i
     int64_t deepstack_dim0 = 0;
 
     {
-        ggml_cgraph * gf = clip_runtime_swap_build_qwen3_pre_graph(ctx, img);
-        if (!clip_runtime_swap_alloc_graph(ctx, gf, {"stream_hidden_out"})) {
+        ggml_cgraph * gf_pre = clip_runtime_swap_build_qwen3_pre_graph(ctx, img, &slots[0]);
+        if (!clip_runtime_swap_alloc_graph(ctx, gf_pre, {"stream_hidden_out"})) {
             return false;
         }
-        clip_graph_set_input_f32(gf, "inp_raw", inp_raw);
-        if (!clip_compute_graph(ctx, n_threads, gf)) {
+        clip_graph_set_input_f32(gf_pre, "inp_raw", inp_raw);
+        if (!clip_compute_graph_async(ctx, n_threads, gf_pre)) {
             return false;
         }
-        ggml_backend_tensor_copy(clip_graph_get_tensor_required(gf, "stream_hidden_out"), hidden_staging.tensor);
-    }
+        ggml_cgraph * first_chunk = nullptr;
+        if (!ctx->model.layers.empty()) {
+            first_chunk = clip_runtime_swap_build_qwen3_chunk_graph(ctx, img, 0, std::min(chunk_layers, (int) ctx->model.layers.size()), &slots[1]);
+        }
+        clip_compute_graph_wait(ctx);
+        ggml_backend_tensor_copy(clip_graph_get_tensor_required(gf_pre, "stream_hidden_out"), hidden_staging.tensor);
+        int cur_slot = 1;
+        ggml_cgraph * gf_chunk = first_chunk;
+        for (int layer_start = 0; layer_start < (int) ctx->model.layers.size(); layer_start += chunk_layers) {
+            const int layer_end = std::min(layer_start + chunk_layers, (int) ctx->model.layers.size());
+            GGML_ASSERT(gf_chunk != nullptr);
+            ggml_cgraph * gf = gf_chunk;
+            const bool has_next = layer_end < (int) ctx->model.layers.size();
+            ggml_cgraph * next_gf = nullptr;
 
-    for (int layer_start = 0; layer_start < (int) ctx->model.layers.size(); layer_start += chunk_layers) {
-        const int layer_end = std::min(layer_start + chunk_layers, (int) ctx->model.layers.size());
-        ggml_cgraph * gf = clip_runtime_swap_build_qwen3_chunk_graph(ctx, img, layer_start, layer_end);
-        if (!clip_runtime_swap_alloc_graph(ctx, gf, {"stream_hidden_in", "stream_hidden_out", "stream_deepstack_out"})) {
-            return false;
+            if (!clip_runtime_swap_alloc_graph(ctx, gf, {"stream_hidden_in", "stream_hidden_out", "stream_deepstack_out"})) {
+                return false;
+            }
+            ggml_backend_tensor_copy(hidden_staging.tensor, clip_graph_get_tensor_required(gf, "stream_hidden_in"));
+            clip_graph_set_input_i32(gf, "positions", positions);
+            if (!clip_compute_graph_async(ctx, n_threads, gf)) {
+                return false;
+            }
+
+            if (has_next) {
+                const int next_layer_end = std::min(layer_end + chunk_layers, (int) ctx->model.layers.size());
+                next_gf = clip_runtime_swap_build_qwen3_chunk_graph(ctx, img, layer_end, next_layer_end, &slots[cur_slot ^ 1]);
+            } else {
+                next_gf = clip_runtime_swap_build_qwen3_post_graph(ctx, img, &slots[cur_slot ^ 1]);
+            }
+
+            clip_compute_graph_wait(ctx);
+
+            ggml_backend_tensor_copy(clip_graph_get_tensor_required(gf, "stream_hidden_out"), hidden_staging.tensor);
+
+            ggml_tensor * deepstack = ggml_graph_get_tensor(gf, "stream_deepstack_out");
+            if (deepstack != nullptr) {
+                GGML_ASSERT(deepstack_staging.tensor != nullptr);
+                const int chunk_deepstack_layers = clip_qwen3_count_deepstack_layers(ctx, layer_start, layer_end);
+                GGML_ASSERT(chunk_deepstack_layers > 0);
+                GGML_ASSERT(deepstack->ne[0] == deepstack_embd * chunk_deepstack_layers);
+                clip_copy_tensor_dim0_to_staging(deepstack, deepstack_staging, deepstack_dim0);
+                deepstack_dim0 += deepstack->ne[0];
+            }
+
+            gf_chunk = next_gf;
+            cur_slot ^= 1;
+        }
+
+        ggml_cgraph * gf = gf_chunk;
+        if (!clip_runtime_swap_alloc_graph(ctx, gf, {"stream_hidden_in", "stream_deepstack_in"})) {
+            GGML_ABORT("unexpected runtime swap graph state");
         }
         ggml_backend_tensor_copy(hidden_staging.tensor, clip_graph_get_tensor_required(gf, "stream_hidden_in"));
-        clip_graph_set_input_i32(gf, "positions", positions);
+        if (deepstack_staging.tensor != nullptr) {
+            if (deepstack_dim0 != deepstack_staging.tensor->ne[0]) {
+                LOG_ERR("%s: expected deepstack dim0 %" PRId64 ", got %" PRId64 "\n", __func__, deepstack_staging.tensor->ne[0], deepstack_dim0);
+                return false;
+            }
+            ggml_backend_tensor_copy(deepstack_staging.tensor, clip_graph_get_tensor_required(gf, "stream_deepstack_in"));
+        }
         if (!clip_compute_graph(ctx, n_threads, gf)) {
             return false;
         }
 
-        ggml_backend_tensor_copy(clip_graph_get_tensor_required(gf, "stream_hidden_out"), hidden_staging.tensor);
-
-        ggml_tensor * deepstack = ggml_graph_get_tensor(gf, "stream_deepstack_out");
-        if (deepstack != nullptr) {
-            GGML_ASSERT(deepstack_staging.tensor != nullptr);
-            const int chunk_deepstack_layers = clip_qwen3_count_deepstack_layers(ctx, layer_start, layer_end);
-            GGML_ASSERT(chunk_deepstack_layers > 0);
-            GGML_ASSERT(deepstack->ne[0] == deepstack_embd * chunk_deepstack_layers);
-            clip_copy_tensor_dim0_to_staging(deepstack, deepstack_staging, deepstack_dim0);
-            deepstack_dim0 += deepstack->ne[0];
+        ggml_tensor * embeddings = clip_graph_get_tensor_required(gf, "stream_embeddings");
+        const int n_tokens_out = embeddings->ne[1];
+        const int expected_n_tokens_out = clip_n_output_tokens(ctx, imgs.entries[0].get());
+        if (n_tokens_out != expected_n_tokens_out) {
+            LOG_ERR("%s: expected output %d tokens, got %d\n", __func__, expected_n_tokens_out, n_tokens_out);
+            GGML_ABORT("Invalid number of output tokens");
         }
-    }
 
-    ggml_cgraph * gf = clip_runtime_swap_build_qwen3_post_graph(ctx, img);
-    if (!clip_runtime_swap_alloc_graph(ctx, gf, {"stream_hidden_in", "stream_deepstack_in"})) {
-        return false;
-    }
-    ggml_backend_tensor_copy(hidden_staging.tensor, clip_graph_get_tensor_required(gf, "stream_hidden_in"));
-    if (deepstack_staging.tensor != nullptr) {
-        if (deepstack_dim0 != deepstack_staging.tensor->ne[0]) {
-            LOG_ERR("%s: expected deepstack dim0 %" PRId64 ", got %" PRId64 "\n", __func__, deepstack_staging.tensor->ne[0], deepstack_dim0);
-            return false;
+        if (vec != nullptr) {
+            ggml_backend_tensor_get(embeddings, vec, 0, ggml_nbytes(embeddings));
         }
-        ggml_backend_tensor_copy(deepstack_staging.tensor, clip_graph_get_tensor_required(gf, "stream_deepstack_in"));
-    }
-    if (!clip_compute_graph(ctx, n_threads, gf)) {
-        return false;
-    }
 
-    ggml_tensor * embeddings = clip_graph_get_tensor_required(gf, "stream_embeddings");
-    const int n_tokens_out = embeddings->ne[1];
-    const int expected_n_tokens_out = clip_n_output_tokens(ctx, imgs.entries[0].get());
-    if (n_tokens_out != expected_n_tokens_out) {
-        LOG_ERR("%s: expected output %d tokens, got %d\n", __func__, expected_n_tokens_out, n_tokens_out);
-        GGML_ABORT("Invalid number of output tokens");
+        clip_maybe_debug_output_embeddings(ctx, embeddings);
+
+        return true;
     }
-
-    if (vec != nullptr) {
-        ggml_backend_tensor_get(embeddings, vec, 0, ggml_nbytes(embeddings));
-    }
-
-    clip_maybe_debug_output_embeddings(ctx, embeddings);
-
-    return true;
 }
 
 static bool clip_image_batch_encode_runtime_swap(clip_ctx * ctx, const int n_threads, const clip_image_f32_batch & imgs, float * vec) {

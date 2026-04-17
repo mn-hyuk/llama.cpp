@@ -9,6 +9,7 @@
 
 struct clip_graph_siglip : clip_graph {
     clip_graph_siglip(clip_ctx * ctx, const clip_image_f32 & img) : clip_graph(ctx, img) {}
+    clip_graph_siglip(clip_ctx * ctx, const clip_image_f32 & img, std::vector<uint8_t> * compute_meta_override) : clip_graph(ctx, img, compute_meta_override) {}
     ggml_cgraph * build() override;
 };
 
@@ -30,6 +31,7 @@ struct clip_graph_qwen2vl : clip_graph {
 
 struct clip_graph_qwen3vl : clip_graph {
     clip_graph_qwen3vl(clip_ctx * ctx, const clip_image_f32 & img) : clip_graph(ctx, img) {}
+    clip_graph_qwen3vl(clip_ctx * ctx, const clip_image_f32 & img, std::vector<uint8_t> * compute_meta_override) : clip_graph(ctx, img, compute_meta_override) {}
     ggml_cgraph * build() override;
 };
 
