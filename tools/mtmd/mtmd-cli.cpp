@@ -9,6 +9,7 @@
 #include "chat.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
+#include "mtmd-nvtx.h"
 
 #include <vector>
 #include <limits.h>
@@ -181,6 +182,7 @@ struct mtmd_cli_context {
 };
 
 static int generate_response(mtmd_cli_context & ctx, int n_predict) {
+    mtmd_nvtx_range decode_range("mtmd.decode");
     llama_tokens generated_tokens;
     for (int i = 0; i < n_predict; i++) {
         if (i > n_predict || !g_is_generating || g_is_interrupted) {
@@ -247,11 +249,15 @@ static int eval_message(mtmd_cli_context & ctx, common_chat_msg & msg) {
 
     mtmd::input_chunks chunks(mtmd_input_chunks_init());
     auto bitmaps_c_ptr = ctx.bitmaps.c_ptr();
-    int32_t res = mtmd_tokenize(ctx.ctx_vision.get(),
-                        chunks.ptr.get(), // output
-                        &text, // text
-                        bitmaps_c_ptr.data(),
-                        bitmaps_c_ptr.size());
+    int32_t res;
+    {
+        mtmd_nvtx_range tokenize_range("mtmd.tokenize");
+        res = mtmd_tokenize(ctx.ctx_vision.get(),
+                    chunks.ptr.get(), // output
+                    &text, // text
+                    bitmaps_c_ptr.data(),
+                    bitmaps_c_ptr.size());
+    }
     if (res != 0) {
         LOG_ERR("Unable to tokenize prompt, res = %d\n", res);
         return 1;
@@ -260,16 +266,19 @@ static int eval_message(mtmd_cli_context & ctx, common_chat_msg & msg) {
     ctx.bitmaps.entries.clear();
 
     llama_pos new_n_past;
-    if (mtmd_helper_eval_chunks(ctx.ctx_vision.get(),
-                ctx.lctx, // lctx
-                chunks.ptr.get(), // chunks
-                ctx.n_past, // n_past
-                0, // seq_id
-                ctx.n_batch, // n_batch
-                true, // logits_last
-                &new_n_past)) {
-        LOG_ERR("Unable to eval prompt\n");
-        return 1;
+    {
+        mtmd_nvtx_range prefill_range("mtmd.prefill");
+        if (mtmd_helper_eval_chunks(ctx.ctx_vision.get(),
+                    ctx.lctx, // lctx
+                    chunks.ptr.get(), // chunks
+                    ctx.n_past, // n_past
+                    0, // seq_id
+                    ctx.n_batch, // n_batch
+                    true, // logits_last
+                    &new_n_past)) {
+            LOG_ERR("Unable to eval prompt\n");
+            return 1;
+        }
     }
 
     ctx.n_past = new_n_past;

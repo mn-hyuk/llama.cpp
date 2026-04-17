@@ -55,6 +55,35 @@ target_include_directories(mtmd PRIVATE ../..)
 target_include_directories(mtmd PRIVATE ../../vendor)
 target_compile_features   (mtmd PRIVATE cxx_std_17)
 
+function(mtmd_enable_nvtx target_name)
+    if (TARGET CUDA::nvtx3)
+        target_link_libraries(${target_name} PRIVATE CUDA::nvtx3)
+        return()
+    endif()
+
+    if (TARGET CUDA::nvToolsExt)
+        target_link_libraries(${target_name} PRIVATE CUDA::nvToolsExt)
+        return()
+    endif()
+
+    if (TARGET CUDA::cudart)
+        target_include_directories(${target_name} PRIVATE
+            $<TARGET_PROPERTY:CUDA::cudart,INTERFACE_INCLUDE_DIRECTORIES>)
+        return()
+    endif()
+
+    if (TARGET CUDA::cudart_static)
+        target_include_directories(${target_name} PRIVATE
+            $<TARGET_PROPERTY:CUDA::cudart_static,INTERFACE_INCLUDE_DIRECTORIES>)
+    endif()
+
+    if (CMAKE_DL_LIBS)
+        target_link_libraries(${target_name} PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+endfunction()
+
+mtmd_enable_nvtx(mtmd)
+
 if (BUILD_SHARED_LIBS)
     set_target_properties     (mtmd PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_compile_definitions(mtmd PRIVATE LLAMA_BUILD)
@@ -108,9 +137,11 @@ if(LLAMA_TOOLS_INSTALL)
 endif()
 target_link_libraries  (${TARGET} PRIVATE common mtmd Threads::Threads)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
+mtmd_enable_nvtx(${TARGET})
 
 # mtmd-debug tool
 add_executable(llama-mtmd-debug debug/mtmd-debug.cpp)
 set_target_properties(llama-mtmd-debug PROPERTIES OUTPUT_NAME llama-mtmd-debug)
 target_link_libraries(llama-mtmd-debug PRIVATE common mtmd Threads::Threads)
 target_compile_features(llama-mtmd-debug PRIVATE cxx_std_17)
+mtmd_enable_nvtx(llama-mtmd-debug)

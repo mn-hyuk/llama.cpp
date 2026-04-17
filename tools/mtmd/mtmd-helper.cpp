@@ -9,6 +9,7 @@
 
 #include "mtmd.h"
 #include "mtmd-helper.h"
+#include "mtmd-nvtx.h"
 #include "llama.h"
 
 #include <algorithm>
@@ -242,6 +243,7 @@ int32_t mtmd_helper_decode_image_chunk(
         llama_seq_id seq_id,
         int32_t n_batch,
         llama_pos * new_n_past) {
+    mtmd_nvtx_range prefill_range("mtmd.prefill.multimodal");
     GGML_ASSERT(n_batch > 0);
     auto chunk_type = mtmd_input_chunk_get_type(chunk);
     const char * name = chunk_type == MTMD_INPUT_CHUNK_TYPE_IMAGE ? "image" : "audio";
@@ -363,7 +365,10 @@ int32_t mtmd_helper_eval_chunk_single(mtmd_context * ctx,
 
         LOG_INF("encoding %s slice...\n", name);
 
-        ret = mtmd_encode_chunk(ctx, chunk);
+        {
+            mtmd_nvtx_range vision_range("mtmd.vision.encode");
+            ret = mtmd_encode_chunk(ctx, chunk);
+        }
         if (ret != 0) {
             LOG_ERR("failed to encode %s slice\n", name);
             llama_batch_free(text_batch);

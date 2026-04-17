@@ -2,6 +2,7 @@
 #include "clip-impl.h"
 #include "clip-model.h"
 #include "clip-graph.h"
+#include "mtmd-nvtx.h"
 #include "models/models.h"
 
 #include "ggml.h"
@@ -1528,6 +1529,19 @@ static void clip_force_tensor_backend(clip_ctx * ctx, ggml_cgraph * gf, const ch
     ggml_tensor * tensor = ggml_graph_get_tensor(gf, name);
     if (tensor != nullptr) {
         ggml_backend_sched_set_tensor_backend(ctx->sched.get(), tensor, ctx->backend);
+    }
+}
+
+static void clip_force_graph_gpu_execution(clip_ctx * ctx, ggml_cgraph * gf) {
+    if (ctx->backend == nullptr || ctx->backend == ctx->backend_cpu) {
+        return;
+    }
+
+    clip_force_tensor_backend(ctx, gf, "inp_raw");
+
+    ggml_tensor * embeddings = ggml_graph_node(gf, -1);
+    if (embeddings != nullptr) {
+        ggml_backend_sched_set_tensor_backend(ctx->sched.get(), embeddings, ctx->backend);
     }
 }
 
@@ -4250,6 +4264,7 @@ bool clip_image_encode(struct clip_ctx * ctx, const int n_threads, clip_image_f3
 }
 
 bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_image_f32_batch * imgs_c_ptr, float * vec) {
+    mtmd_nvtx_range vision_encode_range("mtmd.vision.encode.graph");
     const clip_image_f32_batch & imgs = *imgs_c_ptr;
     int batch_size = imgs.entries.size();
 
@@ -4271,6 +4286,7 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
     // build the inference graph
     ggml_backend_sched_reset(ctx->sched.get());
     ggml_cgraph * gf = clip_image_build_graph(ctx, imgs);
+    clip_force_graph_gpu_execution(ctx, gf);
     ggml_backend_sched_alloc_graph(ctx->sched.get(), gf);
 
     // set inputs
@@ -4778,6 +4794,12 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
 
     // the last node is the embedding tensor
     ggml_tensor * embeddings = ggml_graph_node(gf, -1);
+    if (ctx->backend != nullptr && ctx->backend != ctx->backend_cpu) {
+        ggml_backend_t embeddings_backend = ggml_backend_sched_get_tensor_backend(ctx->sched.get(), embeddings);
+        if (embeddings_backend == ctx->backend_cpu) {
+            LOG_WRN("%s: vision embeddings are scheduled on CPU despite GPU mmproj offload\n", __func__);
+        }
+    }
 
     // sanity check (only support batch size of 1 for now)
     const int n_tokens_out = embeddings->ne[1];
